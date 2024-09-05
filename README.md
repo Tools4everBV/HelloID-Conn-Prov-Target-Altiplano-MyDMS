@@ -1,4 +1,4 @@
-# HelloID-Conn-Prov-Target-MyDMS
+# HelloID-Conn-Prov-Target-Altiplano-MyDMS
 
 | :warning: Warning |
 |:---------------------------|
@@ -25,7 +25,7 @@
 
 ## Introduction
 
-_HelloID-Conn-Prov-Target-MyDMS_ is a _target_ connector. MyDMS provides a set of REST API's that allow you to programmatically interact with it's data. The connector contains Account and Authorization management.
+_HelloID-Conn-Prov-Target-Altiplano-MyDMS_ is a _target_ connector. MyDMS provides a set of REST API's that allow you to programmatically interact with it's data. The connector contains Account and Authorization management.
 
 
 ## Getting started
