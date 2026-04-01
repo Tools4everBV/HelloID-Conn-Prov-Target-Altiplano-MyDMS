@@ -1,159 +1,158 @@
-#####################################################
-# HelloID-Conn-Prov-Target-MyDMS-Create
-#
-# Version: 1.0.0
-#####################################################
-# Initialize default value's
-$config = $configuration | ConvertFrom-Json
-$p = $person | ConvertFrom-Json
-$success = $false
-$auditLogs = [System.Collections.Generic.List[PSCustomObject]]::new()
-
-# Account mapping
-$account = [PSCustomObject]@{
-    _login           = $p.Contact.Business.Email
-    _upn             = $p.Contact.Business.Email
-    _firstName       = $p.Name.NickName
-    _lastName        = $p.Name.FamilyName
-    _fullName        = $p.DisplayName
-    _email           = $p.Contact.Business.Email
-    _employeeNr      = $p.ExternalId
-    _startEmployment = $p.PrimaryContract.StartDate
-    _endEmployment   = $p.PrimaryContract.EndDate
-    _function        = $p.PrimaryContract.Title.ExternalId
-    _phone           = $p.Contact.Business.Phone.Fixed
-    _mobile          = $p.Contact.Business.Phone.Mobile
-}
+#################################################
+# HelloID-Conn-Prov-Target-Altiplano-MyDMS-Create
+# PowerShell V2
+#################################################
 
 # Enable TLS1.2
 [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
 
-# Set debug logging
-switch ($($config.IsDebug)) {
-    $true { $VerbosePreference = 'Continue' }
-    $false { $VerbosePreference = 'SilentlyContinue' }
-}
-
 #region functions
-function Resolve-HTTPError {
+function Resolve-MyDMSError {
     [CmdletBinding()]
     param (
-        [Parameter(Mandatory,
-            ValueFromPipeline
-        )]
-        [object]$ErrorObject
+        [Parameter(Mandatory)]
+        [object]
+        $ErrorObject
     )
     process {
         $httpErrorObj = [PSCustomObject]@{
-            FullyQualifiedErrorId = $ErrorObject.FullyQualifiedErrorId
-            MyCommand             = $ErrorObject.InvocationInfo.MyCommand
-            RequestUri            = $ErrorObject.TargetObject.RequestUri
-            ScriptStackTrace      = $ErrorObject.ScriptStackTrace
-            ErrorMessage          = ''
+            ScriptLineNumber = $ErrorObject.InvocationInfo.ScriptLineNumber
+            Line             = $ErrorObject.InvocationInfo.Line
+            ErrorDetails     = $ErrorObject.Exception.Message
+            FriendlyMessage  = $ErrorObject.Exception.Message
         }
-        if ($ErrorObject.Exception.GetType().FullName -eq 'Microsoft.PowerShell.Commands.HttpResponseException') {
-            $httpErrorObj.ErrorMessage = $ErrorObject.ErrorDetails.Message
-        } elseif ($ErrorObject.Exception.GetType().FullName -eq 'System.Net.WebException') {
-            $httpErrorObj.ErrorMessage = [System.IO.StreamReader]::new($ErrorObject.Exception.Response.GetResponseStream()).ReadToEnd()
+        if (-not [string]::IsNullOrEmpty($ErrorObject.ErrorDetails.Message)) {
+            $httpErrorObj.ErrorDetails = $ErrorObject.ErrorDetails.Message
+        }
+        elseif ($ErrorObject.Exception.GetType().FullName -eq 'System.Net.WebException') {
+            if ($null -ne $ErrorObject.Exception.Response) {
+                $streamReaderResponse = [System.IO.StreamReader]::new($ErrorObject.Exception.Response.GetResponseStream()).ReadToEnd()
+                if (-not [string]::IsNullOrEmpty($streamReaderResponse)) {
+                    $httpErrorObj.ErrorDetails = $streamReaderResponse
+                }
+            }
+        }
+        try {
+            $errorDetailsObject = ($httpErrorObj.ErrorDetails | ConvertFrom-Json)
+            # Not implemented, but here you can parse the error details from MyDMS to a more user-friendly message
+            $httpErrorObj.FriendlyMessage = $httpErrorObj.ErrorDetails # Temporarily assignment
+        }
+        catch {
+            $httpErrorObj.FriendlyMessage = $httpErrorObj.ErrorDetails
+            Write-Warning $_.Exception.Message
         }
         Write-Output $httpErrorObj
     }
 }
 #endregion
 
-# Begin
 try {
-    # Initalize Authorization Headers
-    $pair = "$($config.UserName):$($config.Password)"
+    # Initial Assignments
+    $outputContext.AccountReference = 'Currently not available'
+
+    # Prepare headers
+    $pair = "$($actionContext.Configuration.UserName):$($actionContext.Configuration.Password)"
     $encodedCreds = [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes($pair))
-    $basicAuthValue = "Basic $encodedCreds"
-    $Headers = @{
-        Authorization = $basicAuthValue
+    $headers = @{
+        Authorization = "Basic $encodedCreds"
     }
 
-    # Verify if a user must be created or correlated
-    try {
-        $connection = @{
-            Method      = 'GET'
-            Uri         = $config.BaseUrl + "/user?employeeNr=$($account._employeeNr)"
-            Body        = $null
-            ContentType = 'application/json'
-            Headers     = $Headers
-            Verbose     = $false
+    # Validate correlation configuration
+    if ($actionContext.CorrelationConfiguration.Enabled) {
+        $correlationField = $actionContext.CorrelationConfiguration.AccountField -replace '_', ''
+        $correlationValue = $actionContext.CorrelationConfiguration.PersonFieldValue
+
+        if ([string]::IsNullOrEmpty($($correlationField))) {
+            throw 'Correlation is enabled but not configured correctly'
         }
-        $AccountResponse = Invoke-RestMethod @connection
-    } catch {
-        if ($($_.Exception.GetType().FullName -eq 'Microsoft.PowerShell.Commands.HttpResponseException') -or
-            $($_.Exception.GetType().FullName -eq 'System.Net.WebException')) {
-            $errorObj = Resolve-HTTPError -ErrorObject $_
-            $errorMessage = "$($errorObj.ErrorMessage)"
-        } else {
-            $errorMessage = "$($_.Exception.Message)"
+        if ([string]::IsNullOrEmpty($($correlationValue))) {
+            throw 'Correlation is enabled but [accountFieldValue] is empty. Please make sure it is correctly mapped'
         }
-    }
-    if ($errorMessage -match 'User account not found') {
-        $action = 'Create'
-    } else {
-        $action = 'CorrelateAndUpdate'
+
+        try {
+            Write-Information "Verifying if a MyDMS account exists where $correlationField is: [$correlationValue]"
+            $splatGetUserParams = @{
+                Uri     = "$($actionContext.Configuration.BaseUrl)/user?$($correlationField)=$([uri]::EscapeDataString("$correlationValue"))"
+                Method  = 'GET'
+                Headers = $headers
+            }
+            $correlatedAccount = Invoke-RestMethod @splatGetUserParams
+        }
+        catch {
+            $errorObj = Resolve-MyDMSError -ErrorObject $PSItem
+            if ($errorObj.FriendlyMessage -notmatch 'User account not found') {
+                throw $_
+            }
+        }
     }
 
-    if ($dryRun -eq $true) {
-        $auditLogs.Add([PSCustomObject]@{
-                Message = "$action MyDMS account for: [$($p.DisplayName)], will be executed during enforcement"
-            })
+    if ($null -eq $correlatedAccount) {
+        $lifecycleProcess = 'CreateAccount'
+    }
+    else {
+        $lifecycleProcess = 'CorrelateAccount'
     }
 
     # Process
-    if (-not($dryRun -eq $true)) {
-        switch ($action) {
-            'Create' {
-                Write-Verbose "Creating MyDMS account for: [$($p.DisplayName)]"
-                $connection['Method'] = 'Post'
-                $connection['body'] = ($account | ConvertTo-Json)
-                $connection['Uri'] = $config.BaseUrl + '/user'
-                $AccountResponse = Invoke-RestMethod @connection
-                break
+    switch ($lifecycleProcess) {
+        'CreateAccount' {
+            $actionContext.Data | Add-Member @{
+                _startEmployment = (Get-Date).AddDays(-1).ToString('dd-MM-yyyy')
+                _endEmployment   = (Get-Date).AddDays(-1).ToString('dd-MM-yyyy')
             }
-            'CorrelateAndUpdate' {
-                Write-Verbose "Correlating and update MyDMS account for: [$($p.DisplayName)]"
-                $account | Add-Member @{
-                    _id = $AccountResponse._id
-                }
-                $connection['Method'] = 'Post'
-                $connection['body'] = ($account | ConvertTo-Json)
-                $connection['Uri'] = $config.BaseUrl + '/user'
-                $AccountResponse = Invoke-RestMethod @connection
-                break
+            $splatCreateParams = @{
+                Uri         = "$($actionContext.Configuration.BaseUrl)/user"
+                Method      = 'POST'
+                Headers     = $headers
+                ContentType = 'application/json'
+                Body        = $actionContext.Data | ConvertTo-Json -Depth 10
             }
+            if (-not($actionContext.DryRun -eq $true)) {
+                Write-Information 'Creating and correlating MyDMS account'
+
+                $createdAccount = Invoke-RestMethod @splatCreateParams
+                $outputContext.Data = $createdAccount | Select-Object -Property $actionContext.Data.PSObject.Properties.Name
+                $outputContext.AccountReference = $createdAccount._id
+            }
+            else {
+                Write-Information '[DryRun] Create and correlate MyDMS account, will be executed during enforcement'
+            }
+            $auditLogMessage = "Create account was successful. AccountReference is: [$($outputContext.AccountReference)]"
+            break
         }
-        $accountReference = $AccountResponse._id
-        $success = $true
-        $auditLogs.Add([PSCustomObject]@{
-                Message = "$action account for: [$($p.DisplayName)] was successful. accountReference is: [$accountReference]"
-                IsError = $false
-            })
+
+        'CorrelateAccount' {
+            Write-Information 'Correlating MyDMS account'
+            $outputContext.Data = $correlatedAccount | Select-Object -Property $actionContext.Data.PSObject.Properties.Name
+            $outputContext.AccountReference = $correlatedAccount._id
+            $outputContext.AccountCorrelated = $true
+            $auditLogMessage = "Correlated account: [$($outputContext.AccountReference)] on field: [$($correlationField)] with value: [$($correlationValue)]"
+            break
+        }
     }
-} catch {
-    $success = $false
+
+    $outputContext.success = $true
+    $outputContext.AuditLogs.Add([PSCustomObject]@{
+            Action  = $lifecycleProcess
+            Message = $auditLogMessage
+            IsError = $false
+        })
+}
+catch {
+    $outputContext.success = $false
     $ex = $PSItem
     if ($($ex.Exception.GetType().FullName -eq 'Microsoft.PowerShell.Commands.HttpResponseException') -or
         $($ex.Exception.GetType().FullName -eq 'System.Net.WebException')) {
-        $errorObj = Resolve-HTTPError -ErrorObject $ex
-        $errorMessage = "Could not $action MyDMS account for: [$($p.DisplayName)]. Error: $($errorObj.ErrorMessage)"
-    } else {
-        $errorMessage = "Could not $action MyDMS account for: [$($p.DisplayName)]. Error: $($ex.Exception.Message)"
+        $errorObj = Resolve-MyDMSError -ErrorObject $ex
+        $auditLogMessage = "Could not create or correlate MyDMS account. Error: $($errorObj.FriendlyMessage)"
+        Write-Warning "Error at Line '$($errorObj.ScriptLineNumber)': $($errorObj.Line). Error: $($errorObj.ErrorDetails)"
     }
-    Write-Verbose $errorMessage
-    $auditLogs.Add([PSCustomObject]@{
-            Message = $errorMessage
+    else {
+        $auditLogMessage = "Could not create or correlate MyDMS account. Error: $($ex.Exception.Message)"
+        Write-Warning "Error at Line '$($ex.InvocationInfo.ScriptLineNumber)': $($ex.InvocationInfo.Line). Error: $($ex.Exception.Message)"
+    }
+    $outputContext.AuditLogs.Add([PSCustomObject]@{
+            Message = $auditLogMessage
             IsError = $true
         })
-} finally {
-    $result = [PSCustomObject]@{
-        Success          = $success
-        AccountReference = $accountReference
-        Auditlogs        = $auditLogs
-        Account          = $account
-    }
-    Write-Output $result | ConvertTo-Json -Depth 10
 }

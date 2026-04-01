@@ -1,7 +1,7 @@
-#################################################
-# HelloID-Conn-Prov-Target-Altiplano-MyDMS-Update
+##################################################
+# HelloID-Conn-Prov-Target-Altiplano-MyDMS-Disable
 # PowerShell V2
-#################################################
+##################################################
 
 # Enable TLS1.2
 [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
@@ -73,21 +73,9 @@ try {
             throw $_
         }
     }
-    $outputContext.PreviousData = $correlatedAccount | Select-Object $outputContext.Data.PSobject.Properties.Name
 
     if ($null -ne $correlatedAccount) {
-        # Always compare the account against the current account in target system
-        $splatCompareProperties = @{
-            ReferenceObject  = @($correlatedAccount.PSObject.Properties)
-            DifferenceObject = @($actionContext.Data.PSObject.Properties)
-        }
-        $propertiesChanged = Compare-Object @splatCompareProperties -PassThru | Where-Object { $_.SideIndicator -eq '=>' }
-        if ($propertiesChanged) {
-            $lifecycleProcess = 'UpdateAccount'
-        }
-        else {
-            $lifecycleProcess = 'NoChanges'
-        }
+        $lifecycleProcess = 'DisableAccount'
     }
     else {
         $lifecycleProcess = 'NotFound'
@@ -95,48 +83,32 @@ try {
 
     # Process
     switch ($lifecycleProcess) {
-        'UpdateAccount' {
-            Write-Information "Account property(s) required to update: $($propertiesChanged.Name -join ', ')"
-
+        'DisableAccount' {
             $body = @{
-                _id = $actionContext.References.Account
-            }
-            foreach ($property in $propertiesChanged) {
-                $body["$($property.Name)"] = $actionContext.Data.$($property.Name)
+                _id            = $actionContext.References.Account
+                _endEmployment = (Get-Date).AddDays(-1).ToString('dd-MM-yyyy')
             }
 
-            # Make sure to test with special characters and if needed; add utf8 encoding.
             if (-not($actionContext.DryRun -eq $true)) {
-                Write-Information "Updating MyDMS account with accountReference: [$($actionContext.References.Account)]"
-                $splatUpdateParams = @{
+                Write-Information "Disabling MyDMS account with accountReference: [$($actionContext.References.Account)]"
+                $splatDisableParams = @{
                     Uri         = "$($actionContext.Configuration.BaseUrl)/user"
                     Method      = 'POST'
                     Headers     = $headers
                     ContentType = 'application/json'
                     Body        = $body | ConvertTo-Json -Depth 10
                 }
-                $updatedAccount = Invoke-RestMethod @splatUpdateParams
-                $outputContext.Data = $updatedAccount | Select-Object $outputContext.Data.PSobject.Properties.Name
-
+                $disabledAccount = Invoke-RestMethod @splatDisableParams
+                $outputContext.Data = $disabledAccount
             }
             else {
-                Write-Information "[DryRun] Update MyDMS account with accountReference: [$($actionContext.References.Account)], will be executed during enforcement"
+                Write-Information "[DryRun] Disable MyDMS account with accountReference: [$($actionContext.References.Account)], will be executed during enforcement"
             }
 
-            # Make sure to filter out arrays from $outputContext.Data (If this is not mapped to type Array in the fieldmapping). This is not supported by HelloID.
+            # Make sure to filter out arrays from $outputContext.Data (If this is not mapped to type Array in the fieldMapping). This is not supported by HelloID.
             $outputContext.Success = $true
             $outputContext.AuditLogs.Add([PSCustomObject]@{
-                    Message = "Update account was successful, Account property(s) updated: [$($propertiesChanged.name -join ',')]"
-                    IsError = $false
-                })
-            break
-        }
-
-        'NoChanges' {
-            Write-Information "No changes to MyDMS account with accountReference: [$($actionContext.References.Account)]"
-            $outputContext.Success = $true
-            $outputContext.AuditLogs.Add([PSCustomObject]@{
-                    Message = "Skipped updating MyDMS account with AccountReference: [$($actionContext.References.Account)]. Reason: No changes."
+                    Message = "Disable account: [$($actionContext.References.Account)] was successful. Action initiated by: [$($actionContext.Origin)]"
                     IsError = $false
                 })
             break
@@ -144,26 +116,26 @@ try {
 
         'NotFound' {
             Write-Information "MyDMS account: [$($actionContext.References.Account)] could not be found, indicating that it may have been deleted"
-            $outputContext.Success = $false
+            $outputContext.Success = $true
             $outputContext.AuditLogs.Add([PSCustomObject]@{
-                    Message = "MyDMS account: [$($actionContext.References.Account)] could not be found, indicating that it may have been deleted"
-                    IsError = $true
+                    Message = "MyDMS account: [$($actionContext.References.Account)] could not be found, indicating that it may have been deleted. Action initiated by: [$($actionContext.Origin)]"
+                    IsError = $false
                 })
             break
         }
     }
 }
 catch {
-    $outputContext.Success = $false
+    $outputContext.success = $false
     $ex = $PSItem
     if ($($ex.Exception.GetType().FullName -eq 'Microsoft.PowerShell.Commands.HttpResponseException') -or
         $($ex.Exception.GetType().FullName -eq 'System.Net.WebException')) {
         $errorObj = Resolve-MyDMSError -ErrorObject $ex
-        $auditLogMessage = "Could not update MyDMS account: [$($actionContext.References.Account)]. Error: $($errorObj.FriendlyMessage)"
+        $auditLogMessage = "Could not disable MyDMS account: [$($actionContext.References.Account)]. Error: $($errorObj.FriendlyMessage). Action initiated by: [$($actionContext.Origin)]"
         Write-Warning "Error at Line '$($errorObj.ScriptLineNumber)': $($errorObj.Line). Error: $($errorObj.ErrorDetails)"
     }
     else {
-        $auditLogMessage = "Could not update MyDMS account: [$($actionContext.References.Account)]. Error: $($ex.Exception.Message)"
+        $auditLogMessage = "Could not disable MyDMS account: [$($actionContext.References.Account)]. Error: $($_.Exception.Message). Action initiated by: [$($actionContext.Origin)]"
         Write-Warning "Error at Line '$($ex.InvocationInfo.ScriptLineNumber)': $($ex.InvocationInfo.Line). Error: $($ex.Exception.Message)"
     }
     $outputContext.AuditLogs.Add([PSCustomObject]@{
