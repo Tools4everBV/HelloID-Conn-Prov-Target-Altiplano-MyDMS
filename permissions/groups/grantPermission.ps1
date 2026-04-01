@@ -1,7 +1,7 @@
-#################################################
-# HelloID-Conn-Prov-Target-Altiplano-MyDMS-Update
+################################################################
+# HelloID-Conn-Prov-Target-Altiplano-MyDMS-GrantPermission-Group
 # PowerShell V2
-#################################################
+################################################################
 
 # Enable TLS1.2
 [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
@@ -46,6 +46,7 @@ function Resolve-MyDMSError {
 }
 #endregion
 
+# Begin
 try {
     # Verify if [accountReference] has a value
     if ([string]::IsNullOrEmpty($($actionContext.References.Account))) {
@@ -73,21 +74,9 @@ try {
             throw $_
         }
     }
-    $outputContext.PreviousData = $correlatedAccount | Select-Object $outputContext.Data.PSobject.Properties.Name
 
     if ($null -ne $correlatedAccount) {
-        # Always compare the account against the current account in target system
-        $splatCompareProperties = @{
-            ReferenceObject  = @($correlatedAccount.PSObject.Properties)
-            DifferenceObject = @($actionContext.Data.PSObject.Properties)
-        }
-        $propertiesChanged = Compare-Object @splatCompareProperties -PassThru | Where-Object { $_.SideIndicator -eq '=>' }
-        if ($propertiesChanged) {
-            $lifecycleProcess = 'UpdateAccount'
-        }
-        else {
-            $lifecycleProcess = 'NoChanges'
-        }
+        $lifecycleProcess = 'GrantPermission'
     }
     else {
         $lifecycleProcess = 'NotFound'
@@ -95,48 +84,25 @@ try {
 
     # Process
     switch ($lifecycleProcess) {
-        'UpdateAccount' {
-            Write-Information "Account property(s) required to update: $($propertiesChanged.Name -join ', ')"
-
-            $body = @{
-                _id = $actionContext.References.Account
-            }
-            foreach ($property in $propertiesChanged) {
-                $body["$($property.Name)"] = $actionContext.Data.$($property.Name)
-            }
-
+        'GrantPermission' {
             # Make sure to test with special characters and if needed; add utf8 encoding.
             if (-not($actionContext.DryRun -eq $true)) {
-                Write-Information "Updating MyDMS account with accountReference: [$($actionContext.References.Account)]"
-                $splatUpdateParams = @{
-                    Uri         = "$($actionContext.Configuration.BaseUrl)/user"
-                    Method      = 'POST'
+                Write-Information "Granting MyDMS permission: [$($actionContext.PermissionDisplayName)] - [$($actionContext.References.Permission.Reference)]"
+                $splatGrantParams = @{
+                    Uri         = "$($actionContext.Configuration.BaseUrl)/user?id=$($actionContext.References.Account)&groupId=$($actionContext.References.Permission.Reference)"
+                    Method      = 'PUT'
                     Headers     = $headers
                     ContentType = 'application/json'
-                    Body        = $body | ConvertTo-Json -Depth 10
                 }
-                $updatedAccount = Invoke-RestMethod @splatUpdateParams
-                $outputContext.Data = $updatedAccount | Select-Object $outputContext.Data.PSobject.Properties.Name
-
+                $null = Invoke-RestMethod @splatGrantParams
             }
             else {
-                Write-Information "[DryRun] Update MyDMS account with accountReference: [$($actionContext.References.Account)], will be executed during enforcement"
+                Write-Information "[DryRun] Grant MyDMS permission: [$($actionContext.PermissionDisplayName)] - [$($actionContext.References.Permission.Reference)], will be executed during enforcement"
             }
 
-            # Make sure to filter out arrays from $outputContext.Data (If this is not mapped to type Array in the fieldmapping). This is not supported by HelloID.
             $outputContext.Success = $true
             $outputContext.AuditLogs.Add([PSCustomObject]@{
-                    Message = "Update account was successful, Account property(s) updated: [$($propertiesChanged.name -join ',')]"
-                    IsError = $false
-                })
-            break
-        }
-
-        'NoChanges' {
-            Write-Information "No changes to MyDMS account with accountReference: [$($actionContext.References.Account)]"
-            $outputContext.Success = $true
-            $outputContext.AuditLogs.Add([PSCustomObject]@{
-                    Message = "Skipped updating MyDMS account with AccountReference: [$($actionContext.References.Account)]. Reason: No changes."
+                    Message = "Grant permission [$($actionContext.PermissionDisplayName)] was successful"
                     IsError = $false
                 })
             break
@@ -154,16 +120,16 @@ try {
     }
 }
 catch {
-    $outputContext.Success = $false
+    $outputContext.success = $false
     $ex = $PSItem
     if ($($ex.Exception.GetType().FullName -eq 'Microsoft.PowerShell.Commands.HttpResponseException') -or
         $($ex.Exception.GetType().FullName -eq 'System.Net.WebException')) {
         $errorObj = Resolve-MyDMSError -ErrorObject $ex
-        $auditLogMessage = "Could not update MyDMS account: [$($actionContext.References.Account)]. Error: $($errorObj.FriendlyMessage)"
+        $auditLogMessage = "Could not grant MyDMS permission for account: [$($actionContext.References.Account)]. Error: $($errorObj.FriendlyMessage)"
         Write-Warning "Error at Line '$($errorObj.ScriptLineNumber)': $($errorObj.Line). Error: $($errorObj.ErrorDetails)"
     }
     else {
-        $auditLogMessage = "Could not update MyDMS account: [$($actionContext.References.Account)]. Error: $($ex.Exception.Message)"
+        $auditLogMessage = "Could not grant MyDMS permission for account: [$($actionContext.References.Account)]. Error: $($_.Exception.Message)"
         Write-Warning "Error at Line '$($ex.InvocationInfo.ScriptLineNumber)': $($ex.InvocationInfo.Line). Error: $($ex.Exception.Message)"
     }
     $outputContext.AuditLogs.Add([PSCustomObject]@{
